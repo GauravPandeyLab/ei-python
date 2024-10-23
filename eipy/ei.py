@@ -186,7 +186,7 @@ class EnsembleIntegration:
         )
         self.feature_names = {}
 
-    def fit_base(self, X, y, base_predictors=None, modality_name=None):
+    def fit_base(self, X, y, base_predictors=None, modality_name=None, X_mode=None, y_mode=None):
         """
         Train base predictors and generate ensemble train/test data.
 
@@ -211,6 +211,11 @@ class EnsembleIntegration:
         )
         #  convert y to a numpy array
         y = y_to_numpy(y)
+        
+        # for passing in modality specific samples for training
+        if y_mode is not None:
+            y_mode = y_to_numpy(y_mode)
+
 
         #  check if base_predictors are passed here
         if base_predictors is not None:
@@ -230,7 +235,7 @@ class EnsembleIntegration:
                 )
         else:
             self._fit_base(
-                X=X, y=y, base_predictors=base_predictors, modality_name=modality_name
+                X=X, y=y, base_predictors=base_predictors, modality_name=modality_name, X_mode=X_mode, y_mode=y_mode
             )
 
     @ignore_warnings(category=ConvergenceWarning)
@@ -371,8 +376,12 @@ class EnsembleIntegration:
         return y_pred
 
     @ignore_warnings(category=ConvergenceWarning)
-    def _fit_base(self, X, y, base_predictors=None, modality_name=None):
+    def _fit_base(self, X, y, base_predictors=None, modality_name=None, X_mode=None, y_mode=None):
         X, feature_names = X_to_numpy(X)
+        
+        # for passing in modality specific samples for training
+        if X_mode is not None:
+            X_mode, _ = X_to_numpy(X_mode)
 
         self.modality_names.append(modality_name)
         self.feature_names[modality_name] = feature_names
@@ -385,6 +394,8 @@ class EnsembleIntegration:
             cv_inner=self.cv_inner,
             base_predictors=self.base_predictors,
             modality_name=modality_name,
+            X_mode=X_mode,
+            y_mode=y_mode
         )
 
         self.ensemble_training_data = append_modality(
@@ -397,6 +408,8 @@ class EnsembleIntegration:
             cv_outer=self.cv_outer,
             base_predictors=self.base_predictors,
             modality_name=modality_name,
+            X_mode=X_mode,
+            y_mode=y_mode
         )
 
         self.ensemble_test_data = append_modality(
@@ -444,7 +457,7 @@ class EnsembleIntegration:
         self.final_models["base models"][modality_name] = base_model_list_of_dicts
 
     def _fit_base_inner(
-        self, X, y, cv_outer, cv_inner, base_predictors=None, modality_name=None
+        self, X, y, cv_outer, cv_inner, base_predictors=None, modality_name=None, X_mode=None, y_mode=None
     ):
         """
         Perform a round of (inner) k-fold cross validation on each outer
@@ -457,13 +470,20 @@ class EnsembleIntegration:
         # dictionaries for ensemble train/test data for each outer fold
         ensemble_training_data_modality = []
 
+        # for passing in modality specific samples for training
+        if X_mode is not None:
+            cv_outer_split_mode = cv_outer.split(X_mode, y_mode)
+        else: # dummy index generator
+            cv_outer_split_mode = [(0,0)]*self.k_outer
+
         # define joblib Parallel function
         with Parallel(
             n_jobs=self.n_jobs, verbose=0, backend=self.parallel_backend
         ) as parallel:
-            for _outer_fold_id, (train_index_outer, _test_index_outer) in enumerate(
+            #for _outer_fold_id, (train_index_outer, _test_index_outer) in enumerate(...
+            for _outer_fold_id, [(train_index_outer, _test_index_outer),(train_index_outer_mode, _test_index_outer_mode)] in enumerate(
                 tqdm(
-                    cv_outer.split(X, y),
+                    zip(cv_outer.split(X, y), cv_outer_split_mode),
                     total=cv_outer.n_splits,
                     desc="Generating ensemble training data",
                     bar_format=bar_format,
@@ -471,6 +491,16 @@ class EnsembleIntegration:
             ):
                 X_train_outer = X[train_index_outer]
                 y_train_outer = y[train_index_outer]
+
+                # for passing in modality specific samples for training
+                if X_mode is not None:
+                    X_train_outer_mode = X_mode[train_index_outer_mode]
+                    y_train_outer_mode = y_mode[train_index_outer_mode]
+                    cv_inner_split_mode = cv_inner.split(X_train_outer_mode, y_train_outer_mode)
+                else:
+                    X_train_outer_mode = None
+                    y_train_outer_mode = None
+                    cv_inner_split_mode = [(0,0)]*self.k_inner
 
                 # spawn n_jobs jobs for each sample, inner_fold and model
                 output = parallel(
@@ -480,11 +510,13 @@ class EnsembleIntegration:
                         model_params=model_params,
                         fold_params=inner_fold_params,
                         sample_state=sample_state,
+                        X_mode=X_train_outer_mode,
+                        y_mode=y_train_outer_mode
+                    )
+                    for inner_fold_params in enumerate(
+                        zip(cv_inner.split(X_train_outer, y_train_outer), cv_inner_split_mode)
                     )
                     for model_params in self.base_predictors.items()
-                    for inner_fold_params in enumerate(
-                        cv_inner.split(X_train_outer, y_train_outer)
-                    )
                     for sample_state in enumerate(self.random_numbers_for_samples)
                 )
 
@@ -503,6 +535,8 @@ class EnsembleIntegration:
         base_predictors=None,
         modality_name=None,
         model_building=False,
+        X_mode = None,
+        y_mode = None
     ):
         """
         Train each base predictor on each outer training set. For generating ensemble test data.
@@ -515,6 +549,12 @@ class EnsembleIntegration:
 
         if base_predictors is not None:
             self.base_predictors = base_predictors  # update base predictors
+        
+        # for passing in modality specific samples for training
+        if X_mode is not None:
+            cv_outer_split_mode = cv_outer.split(X_mode, y_mode)
+        else: # dummy index generator
+            cv_outer_split_mode = [(0,0)]*self.k_outer
 
         # define joblib Parallel function
         with Parallel(
@@ -529,13 +569,15 @@ class EnsembleIntegration:
                     fold_params=outer_fold_params,
                     sample_state=sample_state,
                     model_building=model_building,
+                    X_mode = X_mode,
+                    y_mode = y_mode
                 )
+                for outer_fold_params in enumerate(zip(cv_outer.split(X, y), cv_outer_split_mode))
                 for model_params in tqdm(
                     self.base_predictors.items(),
                     desc=progress_string,
                     bar_format=bar_format,
                 )
-                for outer_fold_params in enumerate(cv_outer.split(X, y))
                 for sample_state in enumerate(self.random_numbers_for_samples)
             )
 
@@ -546,7 +588,7 @@ class EnsembleIntegration:
 
     @ignore_warnings(category=ConvergenceWarning)
     def _train_predict_single_base_predictor(
-        self, X, y, model_params, fold_params, sample_state, model_building=False
+        self, X, y, model_params, fold_params, sample_state, model_building=False, X_mode=None, y_mode=None
     ):
         """
         Train/test single base predictor, on a given training fold,
@@ -554,14 +596,24 @@ class EnsembleIntegration:
         """
 
         model_name, model = model_params
+        
 
         model = clone(model)
-
-        fold_id, (train_index, test_index) = fold_params
+        # fold_id, (train_index, test_index) = fold_params
+        fold_id, [(train_index, test_index),(train_index_mode, test_index_mode)] = fold_params
         sample_id, sample_random_state = sample_state
+
 
         X_train, X_test = X[train_index], X[test_index]
         y_train, y_test = y[train_index], y[test_index]
+
+        #for passing in modality specific samples for training
+        if X_mode is not None:
+            X_train = np.concatenate([X_train, X_mode[train_index_mode]])
+            y_train = np.concatenate([y_train, y_mode[train_index_mode]])
+
+
+
         X_sample, y_sample = sample(
             X_train,
             y_train,
