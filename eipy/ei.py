@@ -572,12 +572,12 @@ class EnsembleIntegration:
                     X_mode = X_mode,
                     y_mode = y_mode
                 )
-                for outer_fold_params in enumerate(zip(cv_outer.split(X, y), cv_outer_split_mode))
-                for model_params in tqdm(
-                    self.base_predictors.items(),
+                for outer_fold_params in enumerate(
+                    tqdm(zip(cv_outer.split(X, y), cv_outer_split_mode),
                     desc=progress_string,
-                    bar_format=bar_format,
+                    bar_format=bar_format)
                 )
+                for model_params in self.base_predictors.items()
                 for sample_state in enumerate(self.random_numbers_for_samples)
             )
 
